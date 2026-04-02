@@ -136,6 +136,31 @@ QPushButton#danger:hover {
     border: 1px solid #8b2e2e;
     color: #c0392b;
 }
+QPushButton#toggle_on {
+    background-color: #1a1a0f;
+    color: #c9a84c;
+    border: 1px solid #c9a84c44;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 11px;
+    text-align: left;
+}
+QPushButton#toggle_on:hover {
+    background-color: #222210;
+}
+QPushButton#toggle_off {
+    background-color: transparent;
+    color: #444;
+    border: 1px solid #1e1e1e;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 11px;
+    text-align: left;
+}
+QPushButton#toggle_off:hover {
+    border: 1px solid #333;
+    color: #666;
+}
 QListWidget {
     background-color: transparent;
     border: none;
@@ -193,7 +218,7 @@ def save_to_history(digest_text: str):
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "digest": digest_text
     })
-    history = history[:30]  # keep last 30 only
+    history = history[:30]
     os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
     with open(HISTORY_PATH, "w") as f:
         json.dump(history, f, indent=4)
@@ -220,12 +245,13 @@ class RepoFetchThread(QThread):
 
 
 class DigestThread(QThread):
-    done = pyqtSignal(str, str)  # msg, digest_text
+    done = pyqtSignal(str, str)
     error = pyqtSignal(str)
 
-    def __init__(self, email):
+    def __init__(self, email, source_states):
         super().__init__()
         self.email = email
+        self.source_states = source_states
 
     def run(self):
         try:
@@ -239,10 +265,10 @@ class DigestThread(QThread):
             from gh_trending_fetcher import fetch_gh_trending
 
             data = fetch_repo_data()
-            hf = fetch_hf_data()
-            reddit = fetch_reddit_data()
-            devto = fetch_devto_data()
-            trending = fetch_gh_trending()
+            hf = fetch_hf_data() if self.source_states["hf"] else None
+            reddit = fetch_reddit_data() if self.source_states["reddit"] else None
+            devto = fetch_devto_data() if self.source_states["devto"] else None
+            trending = fetch_gh_trending() if self.source_states["trending"] else None
 
             digest = generate_digest(data, hf_data=hf, reddit_data=reddit, devto_data=devto, gh_trending=trending)
             send_digest(self.email, digest)
@@ -350,6 +376,35 @@ class MainWindow(QMainWindow):
         self.status_lbl.setWordWrap(True)
         sidebar_layout.addWidget(self.status_lbl)
 
+        sidebar_layout.addSpacing(24)
+
+        # Source toggles
+        sources_lbl = QLabel("SOURCES")
+        sources_lbl.setObjectName("section_title")
+        sidebar_layout.addWidget(sources_lbl)
+        sidebar_layout.addSpacing(8)
+
+        self.source_states = {
+            "hf": True, "reddit": True, "devto": True, "trending": True
+        }
+
+        self.toggle_hf = QPushButton("✓  HuggingFace")
+        self.toggle_reddit = QPushButton("✓  Reddit")
+        self.toggle_devto = QPushButton("✓  Dev.to")
+        self.toggle_trending = QPushButton("✓  GitHub Trending")
+
+        for btn, key in [
+            (self.toggle_hf, "hf"),
+            (self.toggle_reddit, "reddit"),
+            (self.toggle_devto, "devto"),
+            (self.toggle_trending, "trending")
+        ]:
+            btn.setObjectName("toggle_on")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda checked, b=btn, k=key: self.toggle_source(b, k))
+            sidebar_layout.addWidget(btn)
+            sidebar_layout.addSpacing(4)
+
         sidebar_layout.addStretch()
 
         send_btn = QPushButton("SEND DIGEST NOW")
@@ -391,10 +446,8 @@ class MainWindow(QMainWindow):
         tab_row.addWidget(self.tab_history)
         tab_row.addStretch()
         main_layout.addLayout(tab_row)
-
         main_layout.addSpacing(20)
 
-        # Stacked widget
         self.stack = QStackedWidget()
         main_layout.addWidget(self.stack)
 
@@ -427,7 +480,6 @@ class MainWindow(QMainWindow):
         divider.setObjectName("divider")
         divider.setFrameShape(QFrame.Shape.HLine)
         repos_layout.addWidget(divider)
-
         repos_layout.addSpacing(20)
 
         bottom_row = QHBoxLayout()
@@ -490,6 +542,16 @@ class MainWindow(QMainWindow):
             self.tab_history.setObjectName("tab_active")
         self.tab_repos.setStyle(self.tab_repos.style())
         self.tab_history.setStyle(self.tab_history.style())
+
+    def toggle_source(self, btn, key):
+        self.source_states[key] = not self.source_states[key]
+        if self.source_states[key]:
+            btn.setObjectName("toggle_on")
+            btn.setText("✓  " + btn.text().replace("✗  ", ""))
+        else:
+            btn.setObjectName("toggle_off")
+            btn.setText("✗  " + btn.text().replace("✓  ", ""))
+        btn.setStyle(btn.style())
 
     def refresh_history(self):
         self.history = self.load_history()
@@ -566,7 +628,7 @@ class MainWindow(QMainWindow):
             self.status_lbl.setText("No email set.")
             return
         self.status_lbl.setText("Sending digest...")
-        self.digest_thread = DigestThread(email)
+        self.digest_thread = DigestThread(email, self.source_states)
         self.digest_thread.done.connect(self.on_digest_done)
         self.digest_thread.error.connect(lambda err: self.status_lbl.setText(f"Error: {err}"))
         self.digest_thread.start()
