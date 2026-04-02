@@ -1,0 +1,23 @@
+{
+    "email": "alikhan4566544@gmail.com",
+    "repos": [
+        {
+            "name": "groq-coding-agent",
+            "owner": "aliii-codes",
+            "url": "https://github.com/aliii-codes/groq-coding-agent",
+            "description": "A Python coding agent powered by Groq (LLaMA 3.3) with an agentic loop and 4 tools .read files, write files, run Python, and list directories."
+        },
+        {
+            "name": "Camera-Code-Snap",
+            "owner": "aliii-codes",
+            "url": "https://github.com/aliii-codes/Camera-Code-Snap",
+            "description": "Convert hand-drawn flowcharts and diagrams into executable code using AI.  This CLI tool analyzes images of flowcharts or agent architecture diagrams and generates clean, functional code in Python or JavaScript."
+        },
+        {
+            "name": "Games-",
+            "owner": "aliii-codes",
+            "url": "https://github.com/aliii-codes/Games-",
+            "description": "A collection of simple, engaging games built for entertainment and learning. This repository includes a variety of games, starting with a 1 vs 1 Space Fighter game, designed to showcase game mechanics and provide a fun experience. I Built them for Fun and its a great resource for beginners to learn about Game Develpoment."
+        }
+    ]
+}
