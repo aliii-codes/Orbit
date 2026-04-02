@@ -1,70 +1,61 @@
-# frontend/GUI.py
-
 import sys
 import json
 import os
 import requests
+from datetime import datetime
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QLabel, QListWidget, QListWidgetItem,
-    QFrame, QMessageBox
+    QFrame, QTextEdit, QStackedWidget
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "data", "config.json")
+HISTORY_PATH = os.path.join(os.path.dirname(__file__), "data", "history.json")
 GITHUB_API = "https://api.github.com/users/{}/repos"
 
 STYLE = """
 * {
     font-family: 'Segoe UI', sans-serif;
 }
-
 QMainWindow, QWidget#root {
     background-color: #0a0a0a;
 }
-
 QWidget#sidebar {
     background-color: #0f0f0f;
     border-right: 1px solid #1e1e1e;
 }
-
 QWidget#main {
     background-color: #0a0a0a;
 }
-
 QLabel#brand {
     font-size: 11px;
     letter-spacing: 4px;
     color: #c9a84c;
     font-weight: bold;
 }
-
 QLabel#tagline {
     font-size: 22px;
     color: #f0ece4;
     font-weight: 300;
     line-height: 1.4;
 }
-
 QLabel#tagline_accent {
     font-size: 22px;
     color: #c9a84c;
     font-weight: 600;
 }
-
 QLabel#section_title {
     font-size: 10px;
     letter-spacing: 3px;
     color: #555;
     font-weight: bold;
 }
-
 QLabel#status {
     font-size: 11px;
     color: #555;
     padding: 4px 0;
 }
-
 QLineEdit {
     background-color: #111;
     border: 1px solid #1e1e1e;
@@ -74,12 +65,10 @@ QLineEdit {
     font-size: 13px;
     selection-background-color: #c9a84c;
 }
-
 QLineEdit:focus {
     border: 1px solid #c9a84c;
     background-color: #131313;
 }
-
 QPushButton#primary {
     background-color: #c9a84c;
     color: #0a0a0a;
@@ -90,15 +79,12 @@ QPushButton#primary {
     font-weight: bold;
     letter-spacing: 1px;
 }
-
 QPushButton#primary:hover {
     background-color: #d4b86a;
 }
-
 QPushButton#primary:pressed {
     background-color: #b8973d;
 }
-
 QPushButton#ghost {
     background-color: transparent;
     color: #555;
@@ -108,12 +94,35 @@ QPushButton#ghost {
     font-size: 12px;
     letter-spacing: 1px;
 }
-
 QPushButton#ghost:hover {
     border: 1px solid #c9a84c;
     color: #c9a84c;
 }
-
+QPushButton#tab {
+    background-color: transparent;
+    color: #555;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0px;
+    padding: 10px 20px;
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 2px;
+}
+QPushButton#tab:hover {
+    color: #f0ece4;
+}
+QPushButton#tab_active {
+    background-color: transparent;
+    color: #c9a84c;
+    border: none;
+    border-bottom: 2px solid #c9a84c;
+    border-radius: 0px;
+    padding: 10px 20px;
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 2px;
+}
 QPushButton#danger {
     background-color: transparent;
     color: #555;
@@ -123,12 +132,10 @@ QPushButton#danger {
     font-size: 11px;
     letter-spacing: 1px;
 }
-
 QPushButton#danger:hover {
     border: 1px solid #8b2e2e;
     color: #c0392b;
 }
-
 QListWidget {
     background-color: transparent;
     border: none;
@@ -136,43 +143,60 @@ QListWidget {
     font-size: 13px;
     color: #f0ece4;
 }
-
 QListWidget::item {
     padding: 10px 8px;
     border-bottom: 1px solid #111;
     color: #888;
 }
-
 QListWidget::item:selected {
     background-color: #161410;
     color: #c9a84c;
     border-left: 2px solid #c9a84c;
 }
-
 QListWidget::item:hover {
     background-color: #0f0f0f;
     color: #f0ece4;
 }
-
+QTextEdit {
+    background-color: #0f0f0f;
+    border: 1px solid #1e1e1e;
+    border-radius: 6px;
+    color: #c9d1d9;
+    font-size: 13px;
+    padding: 12px;
+    line-height: 1.6;
+}
 QScrollBar:vertical {
     background: transparent;
     width: 4px;
 }
-
 QScrollBar::handle:vertical {
     background: #1e1e1e;
     border-radius: 2px;
 }
-
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0px;
 }
-
 QFrame#divider {
     background-color: #1e1e1e;
     max-height: 1px;
 }
 """
+
+
+def save_to_history(digest_text: str):
+    history = []
+    if os.path.exists(HISTORY_PATH):
+        with open(HISTORY_PATH, "r") as f:
+            history = json.load(f)
+    history.insert(0, {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "digest": digest_text
+    })
+    history = history[:30]  # keep last 30 only
+    os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
+    with open(HISTORY_PATH, "w") as f:
+        json.dump(history, f, indent=4)
 
 
 class RepoFetchThread(QThread):
@@ -196,7 +220,7 @@ class RepoFetchThread(QThread):
 
 
 class DigestThread(QThread):
-    done = pyqtSignal(str)
+    done = pyqtSignal(str, str)  # msg, digest_text
     error = pyqtSignal(str)
 
     def __init__(self, email):
@@ -209,11 +233,20 @@ class DigestThread(QThread):
             from github_fetcher import fetch_repo_data
             from digest_generator import generate_digest
             from emailer import send_digest
+            from hf_fetcher import fetch_hf_data
+            from reddit_fetcher import fetch_reddit_data
+            from devto_fetcher import fetch_devto_data
+            from gh_trending_fetcher import fetch_gh_trending
 
             data = fetch_repo_data()
-            digest = generate_digest(data)
+            hf = fetch_hf_data()
+            reddit = fetch_reddit_data()
+            devto = fetch_devto_data()
+            trending = fetch_gh_trending()
+
+            digest = generate_digest(data, hf_data=hf, reddit_data=reddit, devto_data=devto, gh_trending=trending)
             send_digest(self.email, digest)
-            self.done.emit("Digest sent ✓")
+            self.done.emit("Digest sent ✓", digest)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -221,10 +254,11 @@ class DigestThread(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Digest — GitHub Agent")
+        self.setWindowTitle("Orbit — GitHub Agent")
         self.setMinimumSize(860, 620)
         self.resize(960, 660)
         self.config = self.load_config()
+        self.history = self.load_history()
         self.setStyleSheet(STYLE)
         self.build_ui()
 
@@ -233,6 +267,12 @@ class MainWindow(QMainWindow):
             with open(CONFIG_PATH, "r") as f:
                 return json.load(f)
         return {"email": "", "repos": []}
+
+    def load_history(self):
+        if os.path.exists(HISTORY_PATH):
+            with open(HISTORY_PATH, "r") as f:
+                return json.load(f)
+        return []
 
     def save_config(self):
         os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
@@ -256,7 +296,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.setContentsMargins(28, 36, 28, 28)
         sidebar_layout.setSpacing(0)
 
-        brand = QLabel("DIGEST AGENT")
+        brand = QLabel("ORBIT")
         brand.setObjectName("brand")
         sidebar_layout.addWidget(brand)
 
@@ -273,7 +313,6 @@ class MainWindow(QMainWindow):
 
         sidebar_layout.addSpacing(40)
 
-        # Email
         email_lbl = QLabel("RECIPIENT EMAIL")
         email_lbl.setObjectName("section_title")
         sidebar_layout.addWidget(email_lbl)
@@ -286,7 +325,6 @@ class MainWindow(QMainWindow):
 
         sidebar_layout.addSpacing(24)
 
-        # Username
         user_lbl = QLabel("GITHUB USERNAME")
         user_lbl.setObjectName("section_title")
         sidebar_layout.addWidget(user_lbl)
@@ -314,7 +352,6 @@ class MainWindow(QMainWindow):
 
         sidebar_layout.addStretch()
 
-        # Send Digest
         send_btn = QPushButton("SEND DIGEST NOW")
         send_btn.setObjectName("primary")
         send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -323,7 +360,6 @@ class MainWindow(QMainWindow):
 
         sidebar_layout.addSpacing(8)
 
-        # Save Config
         save_btn = QPushButton("SAVE CONFIG")
         save_btn.setObjectName("ghost")
         save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -339,7 +375,34 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(32, 36, 32, 28)
         main_layout.setSpacing(0)
 
-        # Available repos
+        # Tab bar
+        tab_row = QHBoxLayout()
+        self.tab_repos = QPushButton("REPOS")
+        self.tab_repos.setObjectName("tab_active")
+        self.tab_repos.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tab_repos.clicked.connect(lambda: self.switch_tab(0))
+
+        self.tab_history = QPushButton("HISTORY")
+        self.tab_history.setObjectName("tab")
+        self.tab_history.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tab_history.clicked.connect(lambda: self.switch_tab(1))
+
+        tab_row.addWidget(self.tab_repos)
+        tab_row.addWidget(self.tab_history)
+        tab_row.addStretch()
+        main_layout.addLayout(tab_row)
+
+        main_layout.addSpacing(20)
+
+        # Stacked widget
+        self.stack = QStackedWidget()
+        main_layout.addWidget(self.stack)
+
+        # ── Page 0: Repos ──
+        repos_page = QWidget()
+        repos_layout = QVBoxLayout(repos_page)
+        repos_layout.setContentsMargins(0, 0, 0, 0)
+
         top_row = QHBoxLayout()
         fetch_title = QLabel("AVAILABLE REPOS")
         fetch_title.setObjectName("section_title")
@@ -350,25 +413,23 @@ class MainWindow(QMainWindow):
         add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         add_btn.clicked.connect(self.add_selected)
         top_row.addWidget(add_btn)
-        main_layout.addLayout(top_row)
-
-        main_layout.addSpacing(16)
+        repos_layout.addLayout(top_row)
+        repos_layout.addSpacing(16)
 
         self.repo_list = QListWidget()
         self.repo_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
-        self.repo_list.setMinimumHeight(220)
-        main_layout.addWidget(self.repo_list)
+        self.repo_list.setMinimumHeight(200)
+        repos_layout.addWidget(self.repo_list)
 
-        main_layout.addSpacing(28)
+        repos_layout.addSpacing(24)
 
         divider = QFrame()
         divider.setObjectName("divider")
         divider.setFrameShape(QFrame.Shape.HLine)
-        main_layout.addWidget(divider)
+        repos_layout.addWidget(divider)
 
-        main_layout.addSpacing(24)
+        repos_layout.addSpacing(20)
 
-        # Monitored repos
         bottom_row = QHBoxLayout()
         monitored_lbl = QLabel("MONITORED REPOS")
         monitored_lbl.setObjectName("section_title")
@@ -379,16 +440,66 @@ class MainWindow(QMainWindow):
         remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         remove_btn.clicked.connect(self.remove_selected)
         bottom_row.addWidget(remove_btn)
-        main_layout.addLayout(bottom_row)
-
-        main_layout.addSpacing(16)
+        repos_layout.addLayout(bottom_row)
+        repos_layout.addSpacing(16)
 
         self.monitored_list = QListWidget()
-        self.monitored_list.setMinimumHeight(160)
-        main_layout.addWidget(self.monitored_list)
+        self.monitored_list.setMinimumHeight(140)
+        repos_layout.addWidget(self.monitored_list)
         self.refresh_monitored()
 
+        self.stack.addWidget(repos_page)
+
+        # ── Page 1: History ──
+        history_page = QWidget()
+        history_layout = QVBoxLayout(history_page)
+        history_layout.setContentsMargins(0, 0, 0, 0)
+
+        history_top = QHBoxLayout()
+        history_lbl = QLabel("PAST DIGESTS")
+        history_lbl.setObjectName("section_title")
+        history_top.addWidget(history_lbl)
+        history_top.addStretch()
+        history_layout.addLayout(history_top)
+        history_layout.addSpacing(16)
+
+        self.history_list = QListWidget()
+        self.history_list.setMaximumHeight(160)
+        self.history_list.currentRowChanged.connect(self.show_digest)
+        history_layout.addWidget(self.history_list)
+
+        history_layout.addSpacing(16)
+
+        self.digest_view = QTextEdit()
+        self.digest_view.setReadOnly(True)
+        self.digest_view.setPlaceholderText("Select a digest to view...")
+        history_layout.addWidget(self.digest_view)
+
+        self.stack.addWidget(history_page)
+
+        self.refresh_history()
         layout.addWidget(main)
+
+    def switch_tab(self, index):
+        self.stack.setCurrentIndex(index)
+        if index == 0:
+            self.tab_repos.setObjectName("tab_active")
+            self.tab_history.setObjectName("tab")
+        else:
+            self.tab_repos.setObjectName("tab")
+            self.tab_history.setObjectName("tab_active")
+        self.tab_repos.setStyle(self.tab_repos.style())
+        self.tab_history.setStyle(self.tab_history.style())
+
+    def refresh_history(self):
+        self.history = self.load_history()
+        self.history_list.clear()
+        for entry in self.history:
+            self.history_list.addItem(f"  {entry['timestamp']}")
+
+    def show_digest(self, index):
+        if 0 <= index < len(self.history):
+            self.digest_view.setText(self.history[index]["digest"])
 
     def fetch_repos(self):
         username = self.username_input.text().strip()
@@ -456,9 +567,14 @@ class MainWindow(QMainWindow):
             return
         self.status_lbl.setText("Sending digest...")
         self.digest_thread = DigestThread(email)
-        self.digest_thread.done.connect(lambda msg: self.status_lbl.setText(msg))
+        self.digest_thread.done.connect(self.on_digest_done)
         self.digest_thread.error.connect(lambda err: self.status_lbl.setText(f"Error: {err}"))
         self.digest_thread.start()
+
+    def on_digest_done(self, msg, digest_text):
+        self.status_lbl.setText(msg)
+        save_to_history(digest_text)
+        self.refresh_history()
 
 
 if __name__ == "__main__":
