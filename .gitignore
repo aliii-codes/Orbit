@@ -9,4 +9,5 @@ wheels/
 # Virtual environments
 .venv
 .env
-history.json
+Frontend/Data/config.json
+Frontend/Data/history.json
