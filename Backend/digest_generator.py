@@ -1,14 +1,70 @@
+import logging
 import os
-from groq import Groq
+from functools import lru_cache
+
 from dotenv import load_dotenv
+
 load_dotenv()
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-client = Groq(api_key=GROQ_API_KEY)
+logger = logging.getLogger(__name__)
+
 ASSISTANT_NAME = "Orbit"
 
-def generate_digest(digest_data: list, hf_data=None, reddit_data=None, devto_data=None, gh_trending=None) -> str | None:
-    if not digest_data and not hf_data and not reddit_data and not devto_data and not gh_trending:
+
+@lru_cache(maxsize=1)
+def _get_llm_client():
+    """Lazily create the LLM client based on config."""
+    from Backend.config import load_config
+
+    config = load_config()
+    provider = config.get("llm_provider", "groq")
+    model = config.get("llm_model", "llama-3.3-70b-versatile")
+
+    if provider == "groq":
+        from groq import Groq
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError("GROQ_API_KEY is not set. Please add it to your .env file.")
+        return {"client": Groq(api_key=api_key), "provider": "groq", "model": model}
+
+    # Use litellm for any other provider (openai, anthropic, ollama, etc.)
+    import litellm
+    return {"client": litellm, "provider": provider, "model": model}
+
+
+def _call_llm(prompt: str, temperature: float = 0.5) -> str:
+    """Call the configured LLM provider and return the response text."""
+    llm = _get_llm_client()
+    provider = llm["provider"]
+    model = llm["model"]
+
+    if provider == "groq":
+        response = llm["client"].chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+        )
+        return response.choices[0].message.content
+
+    # litellm handles all other providers
+    import litellm
+    response = litellm.completion(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+    )
+    return response.choices[0].message.content
+
+
+def generate_digest(
+    digest_data: list[dict] | None = None,
+    hf_data: dict[str, list[dict]] | None = None,
+    reddit_data: list[dict] | None = None,
+    devto_data: list[dict] | None = None,
+    gh_trending: list[dict] | None = None,
+) -> str:
+    """Generate an AI-summarized digest from aggregated source data."""
+    if not any([digest_data, hf_data, reddit_data, devto_data, gh_trending]):
         return "No activity found in the last 24 hours."
 
     raw = ""
@@ -52,24 +108,34 @@ def generate_digest(digest_data: list, hf_data=None, reddit_data=None, devto_dat
 
     # GitHub Trending
     if gh_trending:
-        raw += "\n=== GITHUB TRENDING (Python) ===\n"
+        raw += "\n=== GITHUB TRENDING ===\n"
         for r in gh_trending:
-            raw += f"  - {r['name']} ⭐ {r['stars']} — {r['description']} | {r['url']}\n"
+            lang_label = f" [{r['language']}]" if 'language' in r else ""
+            raw += f"  - {r['name']} ⭐ {r['stars']}{lang_label} — {r['description']} | {r['url']}\n"
 
     prompt = f"""
 You are a developer assistant called {ASSISTANT_NAME}. Below is aggregated data from multiple sources.
 Write a clean, concise daily digest for a developer. Be professional but friendly.
 Sections to include (only if data exists): GitHub Activity, HuggingFace Trending, Reddit Highlights, Dev.to Articles, GitHub Trending.
-Keep it skimmable. Use short bullet points.
+Keep it skimmable. Use short bullet points. Use Markdown formatting (headers, bold, bullets).
 
 Raw Data:
 {raw}
 
-Write the digest now:
+Write the digest now along with the links:
 """
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.5
+
+    try:
+        return _call_llm(prompt)
+    except Exception as e:
+        logger.error("LLM generation failed: %s", e)
+        return f"Digest generation failed: {e}\n\nRaw data:\n{raw}"
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.DEBUG)
+    result = generate_digest(
+        digest_data=[{"repo": "test/repo", "url": "https://github.com/test/repo",
+                       "commits": [], "issues": [], "pulls": []}]
     )
-    return response.choices[0].message.content
+    print(result)

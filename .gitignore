@@ -11,3 +11,14 @@ wheels/
 .env
 Frontend/Data/config.json
 Frontend/Data/history.json
+
+# PyInstaller
+*.spec.bak
+
+# Testing
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp

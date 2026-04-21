@@ -1,17 +1,30 @@
-import sys
 import json
+import logging
 import os
-import requests
-from datetime import datetime
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLineEdit, QLabel, QListWidget, QListWidgetItem,
-    QFrame, QTextEdit, QStackedWidget
-)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+import sys
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "data", "config.json")
-HISTORY_PATH = os.path.join(os.path.dirname(__file__), "data", "history.json")
+import requests
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtWidgets import (
+    QApplication, QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QPushButton, QSystemTrayIcon, QTextEdit, QTimeEdit, QVBoxLayout,
+    QWidget, QStackedWidget,
+)
+
+import sys
+from pathlib import Path
+
+# Path(__file__).resolve().parent.parent / 'Backend'
+
+from Backend.config import (
+    CONFIG_PATH, HISTORY_PATH, load_config, save_config,
+    load_history, save_to_history, ensure_config,
+)
+
+logger = logging.getLogger(__name__)
+
 GITHUB_API = "https://api.github.com/users/{}/repos"
 
 STYLE = """
@@ -56,6 +69,16 @@ QLabel#status {
     color: #555;
     padding: 4px 0;
 }
+QLabel#status_ok {
+    font-size: 11px;
+    color: #4a7;
+    padding: 4px 0;
+}
+QLabel#status_err {
+    font-size: 11px;
+    color: #c44;
+    padding: 4px 0;
+}
 QLineEdit {
     background-color: #111;
     border: 1px solid #1e1e1e;
@@ -84,6 +107,10 @@ QPushButton#primary:hover {
 }
 QPushButton#primary:pressed {
     background-color: #b8973d;
+}
+QPushButton#primary:disabled {
+    background-color: #333;
+    color: #666;
 }
 QPushButton#ghost {
     background-color: transparent;
@@ -206,36 +233,122 @@ QFrame#divider {
     background-color: #1e1e1e;
     max-height: 1px;
 }
+QTimeEdit {
+    background-color: #111;
+    border: 1px solid #1e1e1e;
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: #f0ece4;
+    font-size: 13px;
+}
+QTimeEdit:focus {
+    border: 1px solid #c9a84c;
+}
+QDialog {
+    background-color: #0a0a0a;
+}
 """
 
 
-def save_to_history(digest_text: str):
-    history = []
-    if os.path.exists(HISTORY_PATH):
-        with open(HISTORY_PATH, "r") as f:
-            history = json.load(f)
-    history.insert(0, {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "digest": digest_text
-    })
-    history = history[:30]
-    os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
-    with open(HISTORY_PATH, "w") as f:
-        json.dump(history, f, indent=4)
+# ── First-Run Wizard ───────────────────────────────────────
 
+class FirstRunWizard(QDialog):
+    """Dialog shown on first launch when .env keys are missing."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Orbit — Setup")
+        self.setMinimumSize(480, 400)
+        self.setStyleSheet(STYLE)
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(32, 32, 32, 32)
+        layout.setSpacing(16)
+
+        title = QLabel("Welcome to Orbit")
+        title.setObjectName("tagline")
+        layout.addWidget(title)
+
+        subtitle = QLabel("Set up your API keys to get started. These are saved to your .env file.")
+        subtitle.setObjectName("status")
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+
+        layout.addSpacing(12)
+
+        self.fields = {}
+        env_vars = [
+            ("GITHUB_TOKEN", "GitHub Personal Access Token", ""),
+            ("GROQ_API_KEY", "Groq API Key", ""),
+            ("GMAIL_USER", "Gmail Address", ""),
+            ("GMAIL_APP_PASSWORD", "Gmail App Password", ""),
+        ]
+
+        for key, label_text, placeholder in env_vars:
+            lbl = QLabel(label_text.upper())
+            lbl.setObjectName("section_title")
+            layout.addWidget(lbl)
+            inp = QLineEdit()
+            inp.setPlaceholderText(placeholder)
+            inp.setEchoMode(QLineEdit.EchoMode.Password if "PASSWORD" in key or "TOKEN" in key else QLineEdit.EchoMode.Normal)
+            layout.addWidget(inp)
+            self.fields[key] = inp
+            layout.addSpacing(4)
+
+        layout.addSpacing(16)
+
+        btn = QPushButton("SAVE & CONTINUE")
+        btn.setObjectName("primary")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.clicked.connect(self._save)
+        layout.addWidget(btn)
+
+    def _save(self):
+        env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
+        lines = []
+        if os.path.exists(env_path):
+            with open(env_path, "r") as f:
+                lines = f.readlines()
+
+        existing = {}
+        for line in lines:
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                existing[k.strip()] = v.strip()
+
+        for key, inp in self.fields.items():
+            val = inp.text().strip()
+            if val:
+                existing[key] = val
+
+        with open(env_path, "w") as f:
+            for k, v in existing.items():
+                f.write(f"{k}={v}\n")
+
+        # Reload dotenv
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+
+        self.accept()
+
+
+# ── Worker Threads ─────────────────────────────────────────
 
 class RepoFetchThread(QThread):
     result = pyqtSignal(list)
     error = pyqtSignal(str)
 
-    def __init__(self, username):
+    def __init__(self, username: str):
         super().__init__()
         self.username = username
 
     def run(self):
         try:
             url = GITHUB_API.format(self.username)
-            res = requests.get(url, params={"per_page": 100, "sort": "updated"})
+            res = requests.get(url, params={"per_page": 100, "sort": "updated"}, timeout=15)
             if res.status_code == 200:
                 self.result.emit(res.json())
             else:
@@ -245,67 +358,242 @@ class RepoFetchThread(QThread):
 
 
 class DigestThread(QThread):
-    done = pyqtSignal(str, str)
+    """Fetches all sources and generates the digest (no sending)."""
+    done = pyqtSignal(str, dict)  # (digest_text, per_source_status)
     error = pyqtSignal(str)
 
-    def __init__(self, email, source_states):
+    def __init__(self, source_states: dict):
         super().__init__()
-        self.email = email
         self.source_states = source_states
 
     def run(self):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from Backend.github_fetcher import fetch_repo_data
+        from Backend.hf_fetcher import fetch_hf_data
+        from Backend.reddit_fetcher import fetch_reddit_data
+        from Backend.devto_fetcher import fetch_devto_data
+        from Backend.gh_trending_fetcher import fetch_gh_trending
+        from Backend.digest_generator import generate_digest
+
+        source_status: dict[str, str] = {}
+        fetch_results: dict[str, object] = {}
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {
+                executor.submit(fetch_repo_data): "github",
+            }
+            if self.source_states.get("hf", True):
+                futures[executor.submit(fetch_hf_data)] = "hf"
+            if self.source_states.get("reddit", True):
+                futures[executor.submit(fetch_reddit_data)] = "reddit"
+            if self.source_states.get("devto", True):
+                futures[executor.submit(fetch_devto_data)] = "devto"
+            if self.source_states.get("trending", True):
+                futures[executor.submit(fetch_gh_trending)] = "trending"
+
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    fetch_results[key] = future.result()
+                    source_status[key] = "ok"
+                except Exception as e:
+                    logger.error("Failed to fetch %s: %s", key, e)
+                    fetch_results[key] = None
+                    source_status[key] = f"error: {e}"
+
         try:
-            sys.path.append(os.path.join(os.path.dirname(__file__), "..", "Backend"))
-            from github_fetcher import fetch_repo_data
-            from digest_generator import generate_digest
-            from emailer import send_digest
-            from hf_fetcher import fetch_hf_data
-            from reddit_fetcher import fetch_reddit_data
-            from devto_fetcher import fetch_devto_data
-            from gh_trending_fetcher import fetch_gh_trending
-
-            data = fetch_repo_data()
-            hf = fetch_hf_data() if self.source_states["hf"] else None
-            reddit = fetch_reddit_data() if self.source_states["reddit"] else None
-            devto = fetch_devto_data() if self.source_states["devto"] else None
-            trending = fetch_gh_trending() if self.source_states["trending"] else None
-
-            digest = generate_digest(data, hf_data=hf, reddit_data=reddit, devto_data=devto, gh_trending=trending)
-            send_digest(self.email, digest)
-            self.done.emit("Digest sent ✓", digest)
+            digest = generate_digest(
+                digest_data=fetch_results.get("github"),
+                hf_data=fetch_results.get("hf"),
+                reddit_data=fetch_results.get("reddit"),
+                devto_data=fetch_results.get("devto"),
+                gh_trending=fetch_results.get("trending"),
+            )
+            self.done.emit(digest, source_status)
         except Exception as e:
             self.error.emit(str(e))
 
 
+class SendThread(QThread):
+    """Sends a pre-generated digest through configured channels."""
+    done = pyqtSignal(dict)  # per-channel results
+    error = pyqtSignal(str)
+
+    def __init__(self, email: str, digest_text: str):
+        super().__init__()
+        self.email = email
+        self.digest_text = digest_text
+
+    def run(self):
+        try:
+            from Backend.emailer import send_digest
+            results = send_digest(self.email, self.digest_text)
+            self.done.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ── Preview Dialog ─────────────────────────────────────────
+
+class PreviewDialog(QDialog):
+    """Shows the generated digest and lets user confirm before sending."""
+
+    def __init__(self, digest_text: str, source_status: dict[str, str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Orbit — Digest Preview")
+        self.setMinimumSize(600, 500)
+        self.setStyleSheet(STYLE)
+        self.confirmed = False
+        self._build_ui(digest_text, source_status)
+
+    def _build_ui(self, digest_text: str, source_status: dict[str, str]):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+
+        title = QLabel("DIGEST PREVIEW")
+        title.setObjectName("section_title")
+        layout.addWidget(title)
+
+        # Source status summary
+        status_parts = []
+        icons = {"ok": "✓", "error": "✗"}
+        for key, status in source_status.items():
+            icon = icons.get("ok" if status == "ok" else "error", "?")
+            status_parts.append(f"{icon} {key}")
+        status_label = QLabel("  ".join(status_parts))
+        status_label.setObjectName("status")
+        layout.addWidget(status_label)
+
+        layout.addSpacing(8)
+
+        view = QTextEdit()
+        view.setReadOnly(True)
+        view.setText(digest_text)
+        view.setMinimumHeight(300)
+        layout.addWidget(view)
+
+        layout.addSpacing(8)
+
+        btn_row = QHBoxLayout()
+        cancel_btn = QPushButton("CANCEL")
+        cancel_btn.setObjectName("ghost")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
+
+        send_btn = QPushButton("SEND DIGEST")
+        send_btn.setObjectName("primary")
+        send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        send_btn.clicked.connect(self._confirm)
+        btn_row.addWidget(send_btn)
+
+        layout.addLayout(btn_row)
+
+    def _confirm(self):
+        self.confirmed = True
+        self.accept()
+
+
+# ── Main Window ────────────────────────────────────────────
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Orbit — GitHub Agent")
+        self.setWindowTitle("Orbit — Daily Digest Agent")
         self.setMinimumSize(860, 620)
         self.resize(960, 660)
-        self.config = self.load_config()
-        self.history = self.load_history()
+
+        ensure_config()
+        self.config = load_config()
+        self.history = load_history()
+        self._pending_digest: str | None = None
+
         self.setStyleSheet(STYLE)
-        self.build_ui()
+        self._build_ui()
+        self._setup_tray()
 
-    def load_config(self):
-        if os.path.exists(CONFIG_PATH):
-            with open(CONFIG_PATH, "r") as f:
-                return json.load(f)
-        return {"email": "", "repos": []}
+    # ── Config helpers ─────────────────────────────────────
 
-    def load_history(self):
-        if os.path.exists(HISTORY_PATH):
-            with open(HISTORY_PATH, "r") as f:
-                return json.load(f)
-        return []
+    def _save_config(self):
+        save_config(self.config)
 
-    def save_config(self):
-        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-        with open(CONFIG_PATH, "w") as f:
-            json.dump(self.config, f, indent=4)
+    # ── System Tray ────────────────────────────────────────
 
-    def build_ui(self):
+    def _setup_tray(self):
+        # Use a simple built-in icon approach; in production, use a .ico file
+        self.tray_icon = QSystemTrayIcon(self)
+
+        # Try to load a custom icon, fall back to a standard pixmap
+        icon_path = os.path.join(os.path.dirname(__file__), "Data", "orbit.ico")
+        if os.path.exists(icon_path):
+            self.tray_icon.setIcon(QIcon(icon_path))
+        else:
+            pixmap = QIcon.fromTheme("applications-internet").pixmap(32, 32)
+            if pixmap.isNull():
+                # Create a minimal colored icon
+                from PyQt6.QtGui import QPixmap, QColor, QPainter
+                px = QPixmap(32, 32)
+                px.fill(QColor(0, 0, 0, 0))
+                painter = QPainter(px)
+                painter.setBrush(QColor("#c9a84c"))
+                painter.drawEllipse(4, 4, 24, 24)
+                painter.end()
+                self.tray_icon.setIcon(QIcon(px))
+
+        tray_menu = QApplication.instance().style().standardIcon(
+            QApplication.instance().style().StandardPixmap.SP_ComputerIcon
+        )
+
+        menu = self.tray_icon.contextMenu()
+        if menu is None:
+            menu = QApplication.instance().menuBar().addMenu("") if False else None
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu()
+
+        show_action = menu.addAction("Show Orbit")
+        show_action.triggered.connect(self._show_window)
+
+        digest_action = menu.addAction("Send Digest Now")
+        digest_action.triggered.connect(self.send_digest_now)
+
+        menu.addSeparator()
+
+        quit_action = menu.addAction("Quit")
+        quit_action.triggered.connect(self._quit_app)
+
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(self._tray_activated)
+        self.tray_icon.show()
+
+    def _tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._show_window()
+
+    def _show_window(self):
+        self.showNormal()
+        self.activateWindow()
+
+    def _quit_app(self):
+        self.tray_icon.hide()
+        QApplication.instance().quit()
+
+    def closeEvent(self, event):
+        """Minimize to tray instead of closing."""
+        event.ignore()
+        self.hide()
+        self.tray_icon.showMessage(
+            "Orbit",
+            "Orbit is running in the background. Double-click the tray icon to show.",
+            QSystemTrayIcon.MessageIcon.Information,
+            2000,
+        )
+
+    # ── UI Build ───────────────────────────────────────────
+
+    def _build_ui(self):
         root = QWidget()
         root.setObjectName("root")
         self.setCentralWidget(root)
@@ -339,6 +627,7 @@ class MainWindow(QMainWindow):
 
         sidebar_layout.addSpacing(40)
 
+        # Email
         email_lbl = QLabel("RECIPIENT EMAIL")
         email_lbl.setObjectName("section_title")
         sidebar_layout.addWidget(email_lbl)
@@ -351,6 +640,7 @@ class MainWindow(QMainWindow):
 
         sidebar_layout.addSpacing(24)
 
+        # GitHub username
         user_lbl = QLabel("GITHUB USERNAME")
         user_lbl.setObjectName("section_title")
         sidebar_layout.addWidget(user_lbl)
@@ -384,9 +674,9 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(sources_lbl)
         sidebar_layout.addSpacing(8)
 
-        self.source_states = {
-            "hf": True, "reddit": True, "devto": True, "trending": True
-        }
+        self.source_states = self.config.get("source_states", {
+            "hf": True, "reddit": True, "devto": True, "trending": True,
+        })
 
         self.toggle_hf = QPushButton("✓  HuggingFace")
         self.toggle_reddit = QPushButton("✓  Reddit")
@@ -397,13 +687,37 @@ class MainWindow(QMainWindow):
             (self.toggle_hf, "hf"),
             (self.toggle_reddit, "reddit"),
             (self.toggle_devto, "devto"),
-            (self.toggle_trending, "trending")
+            (self.toggle_trending, "trending"),
         ]:
-            btn.setObjectName("toggle_on")
+            is_on = self.source_states.get(key, True)
+            btn.setObjectName("toggle_on" if is_on else "toggle_off")
+            prefix = "✓  " if is_on else "✗  "
+            label = key.replace("hf", "HuggingFace").replace("devto", "Dev.to")
+            if key == "trending":
+                label = "GitHub Trending"
+            elif key == "reddit":
+                label = "Reddit"
+            btn.setText(prefix + label)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda checked, b=btn, k=key: self.toggle_source(b, k))
             sidebar_layout.addWidget(btn)
             sidebar_layout.addSpacing(4)
+
+        sidebar_layout.addSpacing(16)
+
+        # Schedule time
+        sched_lbl = QLabel("SCHEDULE TIME")
+        sched_lbl.setObjectName("section_title")
+        sidebar_layout.addWidget(sched_lbl)
+        sidebar_layout.addSpacing(8)
+
+        self.schedule_time = QTimeEdit()
+        sched_str = self.config.get("schedule_time", "08:00")
+        parts = sched_str.split(":")
+        from PyQt6.QtCore import QTime
+        self.schedule_time.setTime(QTime(int(parts[0]), int(parts[1]) if len(parts) > 1 else 0))
+        self.schedule_time.setDisplayFormat("HH:mm")
+        sidebar_layout.addWidget(self.schedule_time)
 
         sidebar_layout.addStretch()
 
@@ -442,8 +756,14 @@ class MainWindow(QMainWindow):
         self.tab_history.setCursor(Qt.CursorShape.PointingHandCursor)
         self.tab_history.clicked.connect(lambda: self.switch_tab(1))
 
+        self.tab_settings = QPushButton("SETTINGS")
+        self.tab_settings.setObjectName("tab")
+        self.tab_settings.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tab_settings.clicked.connect(lambda: self.switch_tab(2))
+
         tab_row.addWidget(self.tab_repos)
         tab_row.addWidget(self.tab_history)
+        tab_row.addWidget(self.tab_settings)
         tab_row.addStretch()
         main_layout.addLayout(tab_row)
         main_layout.addSpacing(20)
@@ -512,6 +832,21 @@ class MainWindow(QMainWindow):
         history_lbl.setObjectName("section_title")
         history_top.addWidget(history_lbl)
         history_top.addStretch()
+
+        # Search box
+        self.history_search = QLineEdit()
+        self.history_search.setPlaceholderText("Search digests...")
+        self.history_search.setFixedWidth(200)
+        self.history_search.textChanged.connect(self._filter_history)
+        history_top.addWidget(self.history_search)
+
+        # Export button
+        export_btn = QPushButton("EXPORT")
+        export_btn.setObjectName("ghost")
+        export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        export_btn.clicked.connect(self._export_history)
+        history_top.addWidget(export_btn)
+
         history_layout.addLayout(history_top)
         history_layout.addSpacing(16)
 
@@ -529,21 +864,117 @@ class MainWindow(QMainWindow):
 
         self.stack.addWidget(history_page)
 
+        # ── Page 2: Settings ──
+        settings_page = QWidget()
+        settings_layout = QVBoxLayout(settings_page)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Subreddits
+        sub_lbl = QLabel("SUBREDDITS (comma-separated)")
+        sub_lbl.setObjectName("section_title")
+        settings_layout.addWidget(sub_lbl)
+        settings_layout.addSpacing(4)
+        self.subreddits_input = QLineEdit()
+        self.subreddits_input.setText(", ".join(self.config.get("subreddits", ["MachineLearning", "artificial", "learnpython"])))
+        settings_layout.addWidget(self.subreddits_input)
+        settings_layout.addSpacing(16)
+
+        # Dev.to tags
+        tags_lbl = QLabel("DEV.TO TAGS (comma-separated)")
+        tags_lbl.setObjectName("section_title")
+        settings_layout.addWidget(tags_lbl)
+        settings_layout.addSpacing(4)
+        self.devto_tags_input = QLineEdit()
+        self.devto_tags_input.setText(", ".join(self.config.get("devto_tags", ["python", "ai", "machinelearning"])))
+        settings_layout.addWidget(self.devto_tags_input)
+        settings_layout.addSpacing(16)
+
+        # Trending languages
+        lang_lbl = QLabel("TRENDING LANGUAGES (comma-separated)")
+        lang_lbl.setObjectName("section_title")
+        settings_layout.addWidget(lang_lbl)
+        settings_layout.addSpacing(4)
+        self.trending_langs_input = QLineEdit()
+        self.trending_langs_input.setText(", ".join(self.config.get("trending_languages", ["python"])))
+        settings_layout.addWidget(self.trending_langs_input)
+        settings_layout.addSpacing(16)
+
+        # LLM Provider
+        llm_lbl = QLabel("LLM PROVIDER")
+        llm_lbl.setObjectName("section_title")
+        settings_layout.addWidget(llm_lbl)
+        settings_layout.addSpacing(4)
+        self.llm_provider_input = QLineEdit()
+        self.llm_provider_input.setPlaceholderText("groq")
+        self.llm_provider_input.setText(self.config.get("llm_provider", "groq"))
+        settings_layout.addWidget(self.llm_provider_input)
+        settings_layout.addSpacing(8)
+
+        llm_model_lbl = QLabel("LLM MODEL")
+        llm_model_lbl.setObjectName("section_title")
+        settings_layout.addWidget(llm_model_lbl)
+        settings_layout.addSpacing(4)
+        self.llm_model_input = QLineEdit()
+        self.llm_model_input.setPlaceholderText("llama-3.3-70b-versatile")
+        self.llm_model_input.setText(self.config.get("llm_model", "llama-3.3-70b-versatile"))
+        settings_layout.addWidget(self.llm_model_input)
+        settings_layout.addSpacing(16)
+
+        # Notification channels
+        notif_lbl = QLabel("NOTIFICATION CHANNELS")
+        notif_lbl.setObjectName("section_title")
+        settings_layout.addWidget(notif_lbl)
+        settings_layout.addSpacing(8)
+
+        channels = self.config.get("notification_channels", ["email"])
+        self.channel_checks = {}
+        for ch in ["email", "slack", "discord"]:
+            cb = QCheckBox(ch.capitalize())
+            cb.setChecked(ch in channels)
+            cb.setStyleSheet("color: #c9d1d9; font-size: 13px;")
+            settings_layout.addWidget(cb)
+            self.channel_checks[ch] = cb
+
+        settings_layout.addSpacing(12)
+
+        # Webhook URLs
+        webhook_lbl = QLabel("SLACK WEBHOOK URL")
+        webhook_lbl.setObjectName("section_title")
+        settings_layout.addWidget(webhook_lbl)
+        settings_layout.addSpacing(4)
+        self.slack_webhook_input = QLineEdit()
+        self.slack_webhook_input.setText(self.config.get("slack_webhook_url", ""))
+        self.slack_webhook_input.setPlaceholderText("https://hooks.slack.com/...")
+        settings_layout.addWidget(self.slack_webhook_input)
+        settings_layout.addSpacing(8)
+
+        discord_lbl = QLabel("DISCORD WEBHOOK URL")
+        discord_lbl.setObjectName("section_title")
+        settings_layout.addWidget(discord_lbl)
+        settings_layout.addSpacing(4)
+        self.discord_webhook_input = QLineEdit()
+        self.discord_webhook_input.setText(self.config.get("discord_webhook_url", ""))
+        self.discord_webhook_input.setPlaceholderText("https://discord.com/api/webhooks/...")
+        settings_layout.addWidget(self.discord_webhook_input)
+
+        settings_layout.addStretch()
+        self.stack.addWidget(settings_page)
+
         self.refresh_history()
         layout.addWidget(main)
 
-    def switch_tab(self, index):
-        self.stack.setCurrentIndex(index)
-        if index == 0:
-            self.tab_repos.setObjectName("tab_active")
-            self.tab_history.setObjectName("tab")
-        else:
-            self.tab_repos.setObjectName("tab")
-            self.tab_history.setObjectName("tab_active")
-        self.tab_repos.setStyle(self.tab_repos.style())
-        self.tab_history.setStyle(self.tab_history.style())
+    # ── Tab switching ──────────────────────────────────────
 
-    def toggle_source(self, btn, key):
+    def switch_tab(self, index: int):
+        self.stack.setCurrentIndex(index)
+        tabs = [self.tab_repos, self.tab_history, self.tab_settings]
+        for i, tab in enumerate(tabs):
+            tab.setObjectName("tab_active" if i == index else "tab")
+            tab.setStyle(tab.style())
+
+    # ── Source toggles ─────────────────────────────────────
+
+    def toggle_source(self, btn: QPushButton, key: str):
         self.source_states[key] = not self.source_states[key]
         if self.source_states[key]:
             btn.setObjectName("toggle_on")
@@ -553,39 +984,91 @@ class MainWindow(QMainWindow):
             btn.setText("✗  " + btn.text().replace("✓  ", ""))
         btn.setStyle(btn.style())
 
+    # ── History ────────────────────────────────────────────
+
     def refresh_history(self):
-        self.history = self.load_history()
+        self.history = load_history()
+        self._populate_history_list(self.history)
+
+    def _populate_history_list(self, entries: list[dict]):
         self.history_list.clear()
-        for entry in self.history:
+        for entry in entries:
             self.history_list.addItem(f"  {entry['timestamp']}")
 
-    def show_digest(self, index):
+    def _filter_history(self, query: str):
+        query = query.lower().strip()
+        if not query:
+            self._populate_history_list(self.history)
+            return
+        filtered = [
+            e for e in self.history
+            if query in e.get("timestamp", "").lower() or query in e.get("digest", "").lower()
+        ]
+        self._populate_history_list(filtered)
+
+    def show_digest(self, index: int):
         if 0 <= index < len(self.history):
             self.digest_view.setText(self.history[index]["digest"])
+
+    def _export_history(self):
+        if not self.history:
+            self._set_status("No history to export.", "err")
+            return
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export History", "orbit_history.md", "Markdown (*.md);;HTML (*.html);;JSON (*.json)"
+        )
+        if not path:
+            return
+
+        try:
+            if path.endswith(".json"):
+                with open(path, "w") as f:
+                    json.dump(self.history, f, indent=2)
+            elif path.endswith(".html"):
+                import mistune
+                md = mistune.create_markdown()
+                html_parts = []
+                for entry in self.history:
+                    html_parts.append(f"<h2>{entry['timestamp']}</h2>")
+                    html_parts.append(md(entry["digest"]))
+                    html_parts.append("<hr>")
+                with open(path, "w") as f:
+                    f.write(f"<html><body style='font-family:sans-serif;max-width:700px;margin:auto;'>"
+                            + "\n".join(html_parts) + "</body></html>")
+            else:  # .md
+                with open(path, "w") as f:
+                    for entry in self.history:
+                        f.write(f"## {entry['timestamp']}\n\n{entry['digest']}\n\n---\n\n")
+            self._set_status(f"Exported to {path}", "ok")
+        except Exception as e:
+            self._set_status(f"Export failed: {e}", "err")
+
+    # ── Repo management ───────────────────────────────────
 
     def fetch_repos(self):
         username = self.username_input.text().strip()
         if not username:
-            self.status_lbl.setText("Enter a username first.")
+            self._set_status("Enter a username first.", "err")
             return
-        self.status_lbl.setText(f"Fetching {username}...")
+        self._set_status(f"Fetching {username}...")
         self.repo_list.clear()
-        self.thread = RepoFetchThread(username)
-        self.thread.result.connect(self.on_fetched)
-        self.thread.error.connect(self.on_error)
-        self.thread.start()
+        self._repo_thread = RepoFetchThread(username)
+        self._repo_thread.result.connect(self.on_fetched)
+        self._repo_thread.error.connect(self.on_error)
+        self._repo_thread.start()
 
-    def on_fetched(self, repos):
+    def on_fetched(self, repos: list):
         self.repo_list.clear()
         for r in repos:
             desc = r.get("description") or "No description"
             item = QListWidgetItem(f"  {r['name']}   —   {desc}")
             item.setData(Qt.ItemDataRole.UserRole, r)
             self.repo_list.addItem(item)
-        self.status_lbl.setText(f"{len(repos)} repos found")
+        self._set_status(f"{len(repos)} repos found", "ok")
 
-    def on_error(self, err):
-        self.status_lbl.setText(f"Error: {err}")
+    def on_error(self, err: str):
+        self._set_status(f"Error: {err}", "err")
 
     def add_selected(self):
         selected = self.repo_list.selectedItems()
@@ -599,44 +1082,105 @@ class MainWindow(QMainWindow):
                     "name": r["name"],
                     "owner": r["owner"]["login"],
                     "url": r["html_url"],
-                    "description": r.get("description") or ""
+                    "description": r.get("description") or "",
                 })
         self.refresh_monitored()
 
     def refresh_monitored(self):
         self.monitored_list.clear()
         for r in self.config["repos"]:
-            self.monitored_list.addItem(f"  {r['owner']} / {r['name']}   —   {r['description']}")
+            self.monitored_list.addItem(f"  {r['owner']} / {r['name']}   —   {r.get('description', '')}")
 
     def remove_selected(self):
         indices = sorted(
             [self.monitored_list.row(i) for i in self.monitored_list.selectedItems()],
-            reverse=True
+            reverse=True,
         )
         for i in indices:
             self.config["repos"].pop(i)
         self.refresh_monitored()
 
+    # ── Save config ────────────────────────────────────────
+
     def save(self):
         self.config["email"] = self.email_input.text().strip()
-        self.save_config()
-        self.status_lbl.setText("Config saved ✓")
+        self.config["source_states"] = self.source_states
+        self.config["schedule_time"] = self.schedule_time.time().toString("HH:mm")
+
+        # Settings page values
+        def _parse_csv(text: str) -> list[str]:
+            return [s.strip() for s in text.split(",") if s.strip()]
+
+        self.config["subreddits"] = _parse_csv(self.subreddits_input.text())
+        self.config["devto_tags"] = _parse_csv(self.devto_tags_input.text())
+        self.config["trending_languages"] = _parse_csv(self.trending_langs_input.text())
+        self.config["llm_provider"] = self.llm_provider_input.text().strip() or "groq"
+        self.config["llm_model"] = self.llm_model_input.text().strip() or "llama-3.3-70b-versatile"
+
+        channels = [ch for ch, cb in self.channel_checks.items() if cb.isChecked()]
+        self.config["notification_channels"] = channels if channels else ["email"]
+        self.config["slack_webhook_url"] = self.slack_webhook_input.text().strip()
+        self.config["discord_webhook_url"] = self.discord_webhook_input.text().strip()
+
+        # Clear cached LLM client so new provider/model takes effect
+        from Backend.digest_generator import _get_llm_client
+        _get_llm_client.cache_clear()
+
+        self._save_config()
+        self._set_status("Config saved ✓", "ok")
+
+    # ── Digest flow ────────────────────────────────────────
 
     def send_digest_now(self):
         email = self.email_input.text().strip()
         if not email:
-            self.status_lbl.setText("No email set.")
+            self._set_status("No email set.", "err")
             return
-        self.status_lbl.setText("Sending digest...")
-        self.digest_thread = DigestThread(email, self.source_states)
-        self.digest_thread.done.connect(self.on_digest_done)
-        self.digest_thread.error.connect(lambda err: self.status_lbl.setText(f"Error: {err}"))
-        self.digest_thread.start()
+        self._set_status("Generating digest...")
+        self._digest_thread = DigestThread(self.source_states)
+        self._digest_thread.done.connect(self._on_digest_generated)
+        self._digest_thread.error.connect(lambda err: self._set_status(f"Error: {err}", "err"))
+        self._digest_thread.start()
 
-    def on_digest_done(self, msg, digest_text):
-        self.status_lbl.setText(msg)
-        save_to_history(digest_text)
-        self.refresh_history()
+    def _on_digest_generated(self, digest_text: str, source_status: dict[str, str]):
+        self._pending_digest = digest_text
+
+        # Show preview dialog
+        preview = PreviewDialog(digest_text, source_status, self)
+        if preview.exec() == QDialog.DialogCode.Accepted and preview.confirmed:
+            self._set_status("Sending digest...")
+            self._send_thread = SendThread(self.email_input.text().strip(), digest_text)
+            self._send_thread.done.connect(self._on_digest_sent)
+            self._send_thread.error.connect(lambda err: self._set_status(f"Send error: {err}", "err"))
+            self._send_thread.start()
+        else:
+            self._set_status("Digest cancelled.")
+
+    def _on_digest_sent(self, results: dict[str, bool]):
+        parts = []
+        for channel, ok in results.items():
+            icon = "✓" if ok else "✗"
+            parts.append(f"{icon} {channel}")
+        self._set_status("Sent: " + " · ".join(parts), "ok" if all(results.values()) else "err")
+
+        # Save to history
+        if self._pending_digest:
+            save_to_history(self._pending_digest)
+            self._pending_digest = None
+            self.refresh_history()
+
+    # ── Status helper ─────────────────────────────────────
+
+    def _set_status(self, text: str, kind: str = ""):
+        """Set status label text and style."""
+        self.status_lbl.setText(text)
+        if kind == "ok":
+            self.status_lbl.setObjectName("status_ok")
+        elif kind == "err":
+            self.status_lbl.setObjectName("status_err")
+        else:
+            self.status_lbl.setObjectName("status")
+        self.status_lbl.setStyle(self.status_lbl.style())
 
 
 if __name__ == "__main__":

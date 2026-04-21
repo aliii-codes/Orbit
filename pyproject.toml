@@ -1,14 +1,27 @@
 [project]
-name = "github-agent-2"
-version = "0.1.0"
-description = "Add your description here"
+name = "orbit"
+version = "0.2.0"
+description = "A developer-focused daily digest agent that aggregates activity from GitHub, HuggingFace, Reddit, Dev.to, and GitHub Trending"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "beautifulsoup4>=4.14.3",
     "groq>=1.1.2",
+    "litellm>=1.40.0",
+    "mistune>=3.0.0",
     "pygithub>=2.9.0",
     "pyqt6>=6.11.0",
     "python-dotenv>=1.2.2",
+    "requests>=2.32.0",
     "schedule>=1.2.2",
+    "tenacity>=8.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-mock>=3.14.0",
+    "pytest-qt>=4.4.0",
+    "responses>=0.25.0",
+    "pyinstaller>=6.0.0",
 ]
